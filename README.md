@@ -143,6 +143,16 @@ Update `DIRPATH`, `BACKUP_DIR`, and `LOG_DIR` to match your setup:
         echo "$(date '+%Y-%m-%d %H:%M:%S') - $1"
     }
 
+    # Installed versions that actually contain a runnable server binary, newest first.
+    # A folder alone is not proof of an install: an interrupted extract can leave an
+    # empty or partial version folder behind.
+    working_versions() {
+        local d
+        ls -d "$DIRPATH"/*/ 2>/dev/null | sort -rV | while read -r d; do
+            [ -x "${d}Linux/TerrariaServer.bin.x86_64" ] && basename "$d"
+        done
+    }
+
     {
         # --- STEP 0: DUPLICATE SCREEN SESSION PROTECTION ---
         if /usr/bin/screen -list | grep -q "\.${INSTANCE_NAME}[[:space:]]"; then
@@ -181,29 +191,48 @@ Update `DIRPATH`, `BACKUP_DIR`, and `LOG_DIR` to match your setup:
 
         if [ -z "$LATEST_VERSION" ] || [ "$LATEST_VERSION" == "null" ]; then
             log "Warning: Could not reach the version API. Falling back to whatever's already installed locally."
-            LATEST_VERSION=$(ls -d "$DIRPATH"/*/ 2>/dev/null | sort -V | tail -n1 | xargs -n1 basename 2>/dev/null)
+            LATEST_VERSION=$(working_versions | head -n1)
             if [ -z "$LATEST_VERSION" ]; then
-                log "Critical Error: Version API unreachable and nothing installed locally. Aborting."
+                log "Critical Error: Version API unreachable and no working install found locally. Aborting."
                 exit 1
             fi
         fi
 
         GAME_DIR="$DIRPATH/$LATEST_VERSION/Linux"
 
-        if [ ! -f "$GAME_DIR/TerrariaServer.bin.x86_64" ]; then
+        # Leftovers from an interrupted earlier update (hidden, so they never count as a version).
+        rm -rf "$DIRPATH"/.stage.* 2>/dev/null
+
+        if [ ! -x "$GAME_DIR/TerrariaServer.bin.x86_64" ]; then
             log "Version $LATEST_VERSION not present locally. Downloading..."
-            cd "$DIRPATH"
-            if wget -q "https://terraria.org/api/download/pc-dedicated-server/terraria-server-$LATEST_VERSION.zip" -O "terraria-server-$LATEST_VERSION.zip" \
-                && unzip -q -o "terraria-server-$LATEST_VERSION.zip" \
-                && chmod +x "$GAME_DIR/TerrariaServer.bin.x86_64"; then
-                log "Version $LATEST_VERSION downloaded and extracted successfully."
+            STAGE=$(mktemp -d "$DIRPATH/.stage.XXXXXX")
+            # Everything is built in a hidden staging folder and only moved into place once
+            # it is complete and verified, so a failed download or extract can never leave
+            # a half-installed version folder behind.
+            if [ -d "$STAGE" ] \
+                && wget -q --tries=3 --timeout=60 "https://terraria.org/api/download/pc-dedicated-server/terraria-server-$LATEST_VERSION.zip" -O "$STAGE/server.zip" \
+                && unzip -tq "$STAGE/server.zip" > /dev/null \
+                && unzip -q "$STAGE/server.zip" -d "$STAGE/extracted" \
+                && [ -f "$STAGE/extracted/$LATEST_VERSION/Linux/TerrariaServer.bin.x86_64" ] \
+                && chmod +x "$STAGE/extracted/$LATEST_VERSION/Linux/TerrariaServer.bin.x86_64"; then
                 # Each release bundles Windows/Mac/Linux builds together - only
-                # Linux is ever used here, so drop the other two immediately.
-                rm -rf "$DIRPATH/$LATEST_VERSION/Windows" "$DIRPATH/$LATEST_VERSION/Mac"
-                log "Removed bundled Windows/Mac builds (Linux-only server)."
+                # Linux is ever used here, so drop the other two.
+                rm -rf "$STAGE/extracted/$LATEST_VERSION/Windows" "$STAGE/extracted/$LATEST_VERSION/Mac"
+                rm -rf "$DIRPATH/$LATEST_VERSION"   # any earlier broken attempt
+                mv "$STAGE/extracted/$LATEST_VERSION" "$DIRPATH/$LATEST_VERSION"
+                rm -rf "$STAGE"
+                log "Version $LATEST_VERSION downloaded, verified and installed (Linux build only)."
             else
-                log "Critical Error: Download/extract of version $LATEST_VERSION failed. Aborting to avoid launching a broken install."
-                exit 1
+                rm -rf "$STAGE"
+                log "Warning: Download/extract of version $LATEST_VERSION failed."
+                FALLBACK_VERSION=$(working_versions | head -n1)
+                if [ -z "$FALLBACK_VERSION" ]; then
+                    log "Critical Error: No working install to fall back on. Aborting."
+                    exit 1
+                fi
+                log "Falling back to the already-installed working version $FALLBACK_VERSION so the server still comes up."
+                LATEST_VERSION="$FALLBACK_VERSION"
+                GAME_DIR="$DIRPATH/$LATEST_VERSION/Linux"
             fi
         else
             log "Version $LATEST_VERSION already present locally. No download needed."
@@ -214,10 +243,13 @@ Update `DIRPATH`, `BACKUP_DIR`, and `LOG_DIR` to match your setup:
         # rollback), removes anything older. Each version's Linux build is
         # tens of MB at most, so this is about avoiding clutter over years
         # of updates, not meaningful disk space.
-        log "Pruning old version folders (keeping the 2 most recent)..."
-        ls -d "$DIRPATH"/*/ 2>/dev/null | sort -V | head -n -2 | while read -r old_dir; do
-            log "Removing old version folder: $old_dir"
-            rm -rf "$old_dir"
+        log "Pruning old version folders (keeping the 2 newest working versions)..."
+        KEEP_VERSIONS=$(working_versions | head -n 2)
+        ls -d "$DIRPATH"/*/ 2>/dev/null | while read -r old_dir; do
+            if ! echo "$KEEP_VERSIONS" | grep -qx "$(basename "$old_dir")"; then
+                log "Removing old or incomplete version folder: $old_dir"
+                rm -rf "$old_dir"
+            fi
         done
         find "$DIRPATH" -maxdepth 1 -name "terraria-server-*.zip" -type f 2>/dev/null | sort -V | head -n -2 | while read -r old_zip; do
             log "Removing old downloaded zip: $old_zip"
@@ -384,6 +416,15 @@ Make it executable:
 
     FULL_LOG_PATH="$LOG_DIR/$LOG_FILE"
 
+    # Installed versions that actually contain a runnable server binary, newest first
+    # (a leftover or half-extracted folder does not count).
+    working_versions() {
+        local d
+        ls -d "$DIRPATH"/*/ 2>/dev/null | sort -rV | while read -r d; do
+            [ -x "${d}Linux/TerrariaServer.bin.x86_64" ] && basename "$d"
+        done
+    }
+
     # If this file exists, the checker refuses to stop the server. It is created
     # when an update did not apply after a restart, so a failed update can never
     # restart the server every 30 minutes. Clear it with: rm "$BLOCK_FLAG"
@@ -454,8 +495,8 @@ Make it executable:
 
         # --- READ THE TRUE INSTALLED VERSION FROM DISK ---
         # No separate manifest needed - the version-numbered folder itself is
-        # the source of truth, verified against the real binary being present.
-        LOCAL_VERSION=$(ls -d "$DIRPATH"/*/ 2>/dev/null | sort -V | tail -n1 | xargs -n1 basename 2>/dev/null)
+        # the source of truth, and only counts if the real binary is present.
+        LOCAL_VERSION=$(working_versions | head -n1)
         if [ -z "$LOCAL_VERSION" ]; then
             log "$(date '+%Y-%m-%d %H:%M:%S') - CRITICAL ERROR: No installed version found under $DIRPATH."
             exit 1
@@ -500,7 +541,7 @@ Make it executable:
             fi
 
             # --- VERIFY THE UPDATE ACTUALLY LANDED ---
-            NEW_LOCAL_VERSION=$(ls -d "$DIRPATH"/*/ 2>/dev/null | sort -V | tail -n1 | xargs -n1 basename 2>/dev/null)
+            NEW_LOCAL_VERSION=$(working_versions | head -n1)
             if [ "$NEW_LOCAL_VERSION" != "$LATEST_VERSION" ]; then
                 log "$(date +'%Y-%m-%d %H:%M:%S') ERROR: Update did NOT apply (installed: ${NEW_LOCAL_VERSION:-none}, expected: $LATEST_VERSION)."
                 echo "$(date +'%Y-%m-%d %H:%M:%S') update to $LATEST_VERSION did not apply (installed: ${NEW_LOCAL_VERSION:-none})" > "$BLOCK_FLAG"
