@@ -324,10 +324,10 @@ Make it executable:
             /usr/bin/screen -S "$INSTANCE_NAME" -X stuff $'exit\n'
 
             log "Waiting for the world to finish saving and the process to exit..."
-            MAX_WAIT=60
+            MAX_WAIT=120    # seconds (one pass of the loop = 1 second)
             COUNT=0
             while pgrep -f "$GAME_PROCESS_NAME" > /dev/null && [ $COUNT -lt $MAX_WAIT ]; do
-                sleep 2
+                sleep 1
                 ((COUNT++))
             done
 
@@ -552,7 +552,7 @@ Add (every 30 minutes shown):
     KillMode=control-group
     SendSIGKILL=no
     TimeoutStartSec=180
-    TimeoutStopSec=420
+    TimeoutStopSec=480
     RemainAfterExit=no
     Restart=always
     RestartSec=60
@@ -569,7 +569,7 @@ Add (every 30 minutes shown):
 > `TimeoutStartSec=180` covers a normal launch with an existing world/version loading directly - raise it if you're generating a large world or downloading a fresh version for the first time.
 
 > [!Note]
-> `TimeoutStopSec=420` covers the full player-facing countdown in `stop_server.sh` (5 min warning through 30s warning = 300s) plus margin for `exit` to actually save and terminate. Without enough headroom here, systemd force-kills the whole process group mid-countdown - silently skipping every warning, not just cutting the last one short.
+> `TimeoutStopSec=480` covers the full worst case of `stop_server.sh`: the player-facing countdown (5 min warning through 30s warning = 300s) plus up to 120s waiting for `exit` to save and terminate, plus 60s of margin. Keep it above that sum if you change either number. Without enough headroom here, systemd force-kills the whole process group mid-countdown - silently skipping every warning, not just cutting the last one short.
 
 **Enable, start, and confirm before moving on:**
 
